@@ -6,7 +6,7 @@ const io = require('socket.io')(http, {
 });
 
 // 模拟一个简单的内存数据库来存储房间号
-let savedRoomId = "888888"; 
+let savedRoomId = "123456"; 
 
 io.on('connection', (socket) => {
     // 当 App 启动时，询问服务器：现在的房间号是多少？
