@@ -20,7 +20,6 @@ const broadcastAudienceCount = (roomId) => {
     const totalClients = clients ? clients.size : 0;
     
     // 逻辑：总人数减去 1 (口译员自己)，得到听众人数
-    // 使用 Math.max 确保人数不会出现负数
     const audienceCount = Math.max(0, totalClients - 1);
     
     console.log(`房间 ${roomId} 当前听众数量: ${audienceCount}`);
@@ -40,7 +39,7 @@ io.on('connection', (socket) => {
     socket.on('update-room-id', (newId) => {
         savedRoomId = newId;
         console.log("房间号已更新为:", savedRoomId);
-        // 通知所有人房间号已更改（可选）
+        // 通知所有人房间号已更改
         io.emit('current-room-is', savedRoomId);
     });
 
@@ -49,16 +48,18 @@ io.on('connection', (socket) => {
         socket.join(roomId);
         console.log(`用户 ${socket.id} 加入了房间: ${roomId}`);
         
+        // --- 核心修复：通知口译员有新听众加入 ---
+        // 我们向房间内的口译员广播这个新用户的 ID
+        // socket.to(roomId) 会发送给房间内除自己以外的所有人
+        socket.to(roomId).emit('new-user-joined', socket.id);
+        
         // 有人进入，更新并广播人数
         broadcastAudienceCount(roomId);
     });
 
-    // 4. 监听断开连接（在真正离开前获取所在房间）
+    // 4. 监听断开连接
     socket.on('disconnecting', () => {
-        // socket.rooms 包含当前用户所在的所有房间列表
         socket.rooms.forEach(roomId => {
-            // 因为此时用户还没完全离开，逻辑上总人数会包含他
-            // 我们在下一帧或稍后广播，以获取用户离开后的准确人数
             setImmediate(() => {
                 broadcastAudienceCount(roomId);
             });
@@ -75,10 +76,10 @@ io.on('connection', (socket) => {
     // 6. WebRTC 信令转发
     socket.on('signal', (data) => {
         if (data.to) {
-            // 定向发送给某个用户
+            // 定向发送给某个用户（例如口译员发给特定的新听众）
             io.to(data.to).emit('signal', { from: socket.id, ...data });
         } else if (data.roomId) {
-            // 在房间内广播（排除发送者自己）
+            // 在房间内广播
             socket.to(data.roomId).emit('signal', { from: socket.id, ...data });
         }
     });
