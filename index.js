@@ -5,6 +5,11 @@ const io = require('socket.io')(http, {
     cors: { origin: "*" }
 });
 
+// =================== 全局配置：听众端网站域名 ===================
+// 以后更换网站时，只需修改这里的网址，提交到 GitHub 即可，无需重新打包 APK！
+const audienceDomain = "https://uscnl.com/translate/";
+// =============================================================
+
 io.on('connection', (socket) => {
     console.log('新客户端连接:', socket.id);
 
@@ -15,8 +20,11 @@ io.on('connection', (socket) => {
 
         console.log(`口译员 [${name}] 携带房间号 [${roomId}] 登录并激活房间`);
         
-        // 告诉口译员：服务器已经登记好该房间
-        socket.emit('interpreter-registered', roomId);
+        // 告诉口译员：服务器已经登记好该房间，并把最新的听众端域名返回给 App 客户端
+        socket.emit('interpreter-registered', {
+            roomId: roomId,
+            domain: audienceDomain
+        });
     });
 
     // 无论是口译员还是听众，加入指定的房间
