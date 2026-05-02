@@ -10,6 +10,9 @@ const io = require('socket.io')(http, {
 const audienceDomain = "https://uscnl.com/translate/";
 // =============================================================
 
+// 服务端内存状态机：用于记录各个房间的直播状态
+const roomStates = {};
+
 io.on('connection', (socket) => {
     console.log('新客户端连接:', socket.id);
 
@@ -20,6 +23,11 @@ io.on('connection', (socket) => {
 
         console.log(`口译员 [${name}] 携带房间号 [${roomId}] 登录并激活房间`);
         
+        // 如果房间在服务器端没有状态记录，初始化为暂停状态
+        if (!roomStates[roomId]) {
+            roomStates[roomId] = 'paused';
+        }
+
         // 告诉口译员：服务器已经登记好该房间，并把最新的听众端域名返回给 App 客户端
         socket.emit('interpreter-registered', {
             roomId: roomId,
@@ -33,8 +41,16 @@ io.on('connection', (socket) => {
         socket.join(roomId);
         console.log(`Socket [${socket.id}] 加入房间: ${roomId}`);
 
-        // 通知房间内的口译员有新听众进入，开始触发 WebRTC 握手
-        socket.to(roomId).emit('new-user-joined', socket.id);
+        // 1. 获取房间当前状态，默认为 paused
+        const currentStatus = roomStates[roomId] || 'paused';
+        
+        // 2. 单独向刚加入的这个客户端推送房间当前的最真状态
+        socket.emit('status-updated', currentStatus);
+
+        // 3. 如果当前房间已经是 live 状态，通知房间内的口译员有新听众进入，触发 WebRTC 握手
+        if (currentStatus === 'live') {
+            socket.to(roomId).emit('new-user-joined', socket.id);
+        }
         
         // 广播当前听众人数
         broadcastAudienceCount(roomId);
@@ -53,11 +69,15 @@ io.on('connection', (socket) => {
     socket.on('interpreter-status', (data) => {
         if (!data) return;
         const { roomId, status } = data;
-        if (roomId) {
-            console.log(`房间 [${roomId}] 口译员状态更新为: ${status}`);
-            // 广播给房间内所有听众（注意：Android 代码中，发送状态是 "paused" 和 "live"）
-            socket.to(roomId).emit('status-updated', status);
-            socket.to(roomId).emit('interpreter-status', data); // 冗余发送，确保兼容所有听众端监听
+        if (roomId && (status === 'live' || status === 'paused')) {
+            console.log(`房间 [${roomId}] 状态更新为: ${status}`);
+            
+            // 缓存房间最新状态到内存中
+            roomStates[roomId] = status;
+
+            // 广播给房间内的所有人
+            io.to(roomId).emit('status-updated', status);
+            io.to(roomId).emit('interpreter-status', data); // 冗余发送，确保兼容
         }
     });
 
