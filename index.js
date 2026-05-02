@@ -2,90 +2,76 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, {
-    cors: { origin: "*" } 
+    cors: { origin: "*" }
 });
 
-// 模拟一个简单的内存数据库来存储房间号
-let savedRoomId = "123456"; 
-
-/**
- * 辅助函数：计算并广播房间内的听众人数
- * @param {string} roomId 房间ID
- */
-const broadcastAudienceCount = (roomId) => {
-    if (!roomId) return;
-    
-    // 获取当前房间的所有客户端 Socket ID 集合
-    const clients = io.sockets.adapter.rooms.get(roomId);
-    const totalClients = clients ? clients.size : 0;
-    
-    // 逻辑：总人数减去 1 (口译员自己)，得到听众人数
-    const audienceCount = Math.max(0, totalClients - 1);
-    
-    console.log(`房间 ${roomId} 当前听众数量: ${audienceCount}`);
-    
-    // 向该房间内的所有人广播最新人数
-    io.to(roomId).emit('update-audience-count', audienceCount);
-};
-
 io.on('connection', (socket) => {
-    
-    // 1. 获取当前房间号
-    socket.on('get-current-room', () => {
-        socket.emit('current-room-is', savedRoomId);
-    });
+    console.log('新客户端连接:', socket.id);
 
-    // 2. 更新房间号
-    socket.on('update-room-id', (newId) => {
-        savedRoomId = newId;
-        console.log("房间号已更新为:", savedRoomId);
-        // 通知所有人房间号已更改
-        io.emit('current-room-is', savedRoomId);
-    });
+    // 口译员带着手机本地缓存的“姓名+房间号”向服务器登记
+    socket.on('register-interpreter', (data) => {
+        const { name, roomId } = data;
+        if (!name || !roomId) return;
 
-    // 3. 加入房间
-    socket.on('join-room', (roomId) => {
-        socket.join(roomId);
-        console.log(`用户 ${socket.id} 加入了房间: ${roomId}`);
+        console.log(`口译员 [${name}] 携带房间号 [${roomId}] 登录并激活房间`);
         
-        // --- 核心修复：通知口译员有新听众加入 ---
-        // 我们向房间内的口译员广播这个新用户的 ID
-        // socket.to(roomId) 会发送给房间内除自己以外的所有人
+        // 告诉口译员：服务器已经登记好该房间
+        socket.emit('interpreter-registered', roomId);
+    });
+
+    // 无论是口译员还是听众，加入指定的房间
+    socket.on('join-room', (roomId) => {
+        if (!roomId) return;
+        socket.join(roomId);
+        console.log(`Socket [${socket.id}] 加入房间: ${roomId}`);
+
+        // 通知房间内的口译员有新听众进入，开始触发 WebRTC 握手
         socket.to(roomId).emit('new-user-joined', socket.id);
         
-        // 有人进入，更新并广播人数
+        // 广播当前听众人数
         broadcastAudienceCount(roomId);
     });
 
-    // 4. 监听断开连接
-    socket.on('disconnecting', () => {
-        socket.rooms.forEach(roomId => {
-            setImmediate(() => {
-                broadcastAudienceCount(roomId);
-            });
-        });
-    });
-
-    // 5. 转发口译员状态（直播/暂停）
-    socket.on('interpreter-status', (data) => {
-        if (data.roomId) {
-            io.to(data.roomId).emit('interpreter-status', data);
-        }
-    });
-
-    // 6. WebRTC 信令转发
+    // WebRTC 核心信令转发
     socket.on('signal', (data) => {
-        if (data.to) {
-            // 定向发送给某个用户（例如口译员发给特定的新听众）
-            io.to(data.to).emit('signal', { from: socket.id, ...data });
-        } else if (data.roomId) {
-            // 在房间内广播
-            socket.to(data.roomId).emit('signal', { from: socket.id, ...data });
+        const toId = data.to;
+        if (toId) {
+            data.from = socket.id;
+            io.to(toId).emit('signal', data);
         }
+    });
+
+    // 口译员更新直播/暂停状态
+    socket.on('interpreter-status', (data) => {
+        const { roomId, status } = data;
+        if (roomId) {
+            socket.to(roomId).emit('status-updated', status);
+        }
+    });
+
+    // 听众断开连接时，更新人数统计
+    socket.on('disconnecting', () => {
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                setTimeout(() => broadcastAudienceCount(room), 500);
+            }
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('客户端断开:', socket.id);
     });
 });
 
+function broadcastAudienceCount(roomId) {
+    const clients = io.sockets.adapter.rooms.get(roomId);
+    const count = clients ? clients.size : 0;
+    // 听众人数 = 总人数 - 1（刨除口译员自己）
+    const audienceCount = Math.max(0, count - 1);
+    io.to(roomId).emit('update-audience-count', audienceCount);
+}
+
 const PORT = process.env.PORT || 3000;
 http.listen(PORT, () => {
-    console.log(`服务器已启动，端口: ${PORT}`);
+    console.log(`服务器正在端口 ${PORT} 上运行`);
 });
