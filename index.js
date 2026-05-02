@@ -7,7 +7,7 @@ const io = require('socket.io')(http, {
 
 // =================== 全局配置：听众端网站域名 ===================
 // 以后更换网站时，只需修改这里的网址，提交到 GitHub 即可，无需重新打包 APK！
-const audienceDomain = "https://aaauscnl.com/translate/";
+const audienceDomain = "https://uscnl.com/translate/";
 // =============================================================
 
 io.on('connection', (socket) => {
