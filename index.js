@@ -51,24 +51,28 @@ io.on('connection', (socket) => {
 
     // 口译员更新直播/暂停状态
     socket.on('interpreter-status', (data) => {
+        if (!data) return;
         const { roomId, status } = data;
         if (roomId) {
+            console.log(`房间 [${roomId}] 口译员状态更新为: ${status}`);
+            // 广播给房间内所有听众（注意：Android 代码中，发送状态是 "paused" 和 "live"）
             socket.to(roomId).emit('status-updated', status);
+            socket.to(roomId).emit('interpreter-status', data); // 冗余发送，确保兼容所有听众端监听
         }
     });
 
-    // =================== 核心修复：转发重连请求 ===================
+    // =================== 转发重连请求 ===================
     // 口译员恢复直播时主动触发，通知房间内的听众进行 WebRTC 重建
     socket.on('request-reconnect', (data) => {
         if (!data) return;
-        // 兼容处理 data 为对象或字符串的情况
+        // 兼容处理 data 为对象（来自 Android App）或纯字符串的情况
         const roomId = typeof data === 'object' ? data.roomId : data;
         if (roomId) {
-            console.log(`房间 [${roomId}] 收到重连指令，广播给全体听众。`);
+            console.log(`房间 [${roomId}] 收到重连指令，广播给全体听众进行重新连接。`);
             socket.to(roomId).emit('request-reconnect');
         }
     });
-    // =============================================================
+    // ====================================================
 
     // 听众断开连接时，更新人数统计
     socket.on('disconnecting', () => {
