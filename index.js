@@ -57,6 +57,19 @@ io.on('connection', (socket) => {
         }
     });
 
+    // =================== 核心修复：转发重连请求 ===================
+    // 口译员恢复直播时主动触发，通知房间内的听众进行 WebRTC 重建
+    socket.on('request-reconnect', (data) => {
+        if (!data) return;
+        // 兼容处理 data 为对象或字符串的情况
+        const roomId = typeof data === 'object' ? data.roomId : data;
+        if (roomId) {
+            console.log(`房间 [${roomId}] 收到重连指令，广播给全体听众。`);
+            socket.to(roomId).emit('request-reconnect');
+        }
+    });
+    // =============================================================
+
     // 听众断开连接时，更新人数统计
     socket.on('disconnecting', () => {
         for (const room of socket.rooms) {
