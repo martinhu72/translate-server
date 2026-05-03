@@ -44,13 +44,12 @@ io.on('connection', (socket) => {
         // 1. 获取房间当前状态，默认为 paused
         const currentStatus = roomStates[roomId] || 'paused';
         
-        // 2. 单独向刚加入的这个客户端推送房间当前的最真状态
+        // 2. 单独向刚加入的这个客户端推送房间当前的状态
         socket.emit('status-updated', currentStatus);
 
-        // 3. 如果当前房间已经是 live 状态，通知房间内的口译员有新听众进入，触发 WebRTC 握手
-        if (currentStatus === 'live') {
-            socket.to(roomId).emit('new-user-joined', socket.id);
-        }
+        // 3. 【核心修改】无条件通知房间内的口译员：有新听众进入，立即开始打通 WebRTC
+        // 即使当前是 'paused' 状态，也要先把底层声音传输管道接通
+        socket.to(roomId).emit('new-user-joined', socket.id);
         
         // 广播当前听众人数
         broadcastAudienceCount(roomId);
@@ -75,24 +74,11 @@ io.on('connection', (socket) => {
             // 缓存房间最新状态到内存中
             roomStates[roomId] = status;
 
-            // 广播给房间内的所有人
+            // 广播给房间内的所有人改变 UI 状态
             io.to(roomId).emit('status-updated', status);
             io.to(roomId).emit('interpreter-status', data); // 冗余发送，确保兼容
         }
     });
-
-    // =================== 转发重连请求 ===================
-    // 口译员恢复直播时主动触发，通知房间内的听众进行 WebRTC 重建
-    socket.on('request-reconnect', (data) => {
-        if (!data) return;
-        // 兼容处理 data 为对象（来自 Android App）或纯字符串的情况
-        const roomId = typeof data === 'object' ? data.roomId : data;
-        if (roomId) {
-            console.log(`房间 [${roomId}] 收到重连指令，广播给全体听众进行重新连接。`);
-            socket.to(roomId).emit('request-reconnect');
-        }
-    });
-    // ====================================================
 
     // 听众断开连接时，更新人数统计
     socket.on('disconnecting', () => {
