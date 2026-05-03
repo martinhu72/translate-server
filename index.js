@@ -33,6 +33,21 @@ io.on('connection', (socket) => {
             roomId: roomId,
             domain: audienceDomain
         });
+
+        // ===================【核心修复】===================
+        // 检查房间里是否已经有等候中的听众（口译员后进房间的情况）
+        const clients = io.sockets.adapter.rooms.get(roomId);
+        if (clients) {
+            clients.forEach((clientId) => {
+                // 排除口译员自己的 Socket ID
+                if (clientId !== socket.id) {
+                    console.log(`发现等候中的听众 [${clientId}]，主动通知口译端建立连接...`);
+                    // 触发口译端，对该听众发起连接
+                    socket.emit('new-user-joined', clientId);
+                }
+            });
+        }
+        // ==================================================
     });
 
     // 无论是口译员还是听众，加入指定的房间
@@ -47,7 +62,7 @@ io.on('connection', (socket) => {
         // 2. 单独向刚加入的这个客户端推送房间当前的状态
         socket.emit('status-updated', currentStatus);
 
-        // 3. 【核心修改】无条件通知房间内的口译员：有新听众进入，立即开始打通 WebRTC
+        // 3. 无条件通知房间内的口译员：有新听众进入，立即开始打通 WebRTC
         // 即使当前是 'paused' 状态，也要先把底层声音传输管道接通
         socket.to(roomId).emit('new-user-joined', socket.id);
         
