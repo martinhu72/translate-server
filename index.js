@@ -1,157 +1,123 @@
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-
 const app = express();
-const server = http.createServer(app);
-
-// 1. 基础健康检查路由（针对 Render/Heroku 探针及防止部署失败）
-app.get('/', (req, res) => {
-    res.send('Live Interpretation Signaling Server is Running.');
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+    cors: { origin: "*" }
 });
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+// =================== 全局配置：听众端网站域名 ===================
+// 以后更换网站时，只需修改这里的网址，提交到 GitHub 即可，无需重新打包 APK！
+const audienceDomain = "https://uscnl.com/translate/";
+// =============================================================
 
-const io = new Server(server, {
-    cors: { 
-        origin: "*", 
-        methods: ["GET", "POST"] 
-    },
-    // 针对移动端频繁网络切换优化心跳检测参数
-    pingTimeout: 10000,
-    pingInterval: 5000
-});
-
-// 服务端核心状态内存池
-// rooms[roomId] = { isLive: false, listeners: Set(socket.id), interpreterId: socket.id }
-const rooms = {};
-
-function getOrCreateRoom(roomId) {
-    if (!rooms[roomId]) {
-        rooms[roomId] = {
-            isLive: false,
-            listeners: new Set(),
-            interpreterId: null
-        };
-    }
-    return rooms[roomId];
-}
-
-// 向房间内全员广播同步当前房间状态和听众总数
-function broadcastRoomStatus(roomId) {
-    const room = rooms[roomId];
-    if (!room) return;
-
-    const listenersCount = room.listeners.size;
-    const status = room.isLive ? 'live' : 'paused';
-
-    io.to(roomId).emit('status-updated', {
-        status: status,
-        listenersCount: listenersCount,
-        interpreterOnline: !!room.interpreterId
-    });
-}
-
-// 辅助函数：从当前 Socket 的旧角色和旧房间中安全清除
-function cleanUpSocketRole(socket) {
-    const { roomId, role } = socket;
-    if (!roomId || !rooms[roomId]) return;
-
-    const room = rooms[roomId];
-
-    if (role === 'listener') {
-        room.listeners.delete(socket.id);
-        console.log(`听众 ${socket.id} 离开房间 ${roomId}，剩余听众: ${room.listeners.size}`);
-    } else if (role === 'interpreter') {
-        if (room.interpreterId === socket.id) {
-            room.interpreterId = null;
-            room.isLive = false; // 译员离线，自动暂停直播
-            console.log(`译员 ${socket.id} 离开，房间 ${roomId} 自动暂停直播`);
-        }
-    }
-
-    // 广播状态更新
-    broadcastRoomStatus(roomId);
-
-    // 若房间没人也没译员，清理内存
-    if (room.listeners.size === 0 && !room.interpreterId) {
-        delete rooms[roomId];
-        console.log(`房间 ${roomId} 已清空并从内存中销毁`);
-    }
-}
+// 服务端内存状态机：用于记录各个房间的直播状态
+const roomStates = {};
 
 io.on('connection', (socket) => {
-    console.log('用户已连接:', socket.id);
+    console.log('新客户端连接:', socket.id);
 
-    // 1. 口译员加入房间
-    socket.on('join-as-interpreter', (roomId) => {
-        if (!roomId) return;
+    // 口译员带着手机本地缓存的“姓名+房间号”向服务器登记
+    socket.on('register-interpreter', (data) => {
+        const { name, roomId } = data;
+        if (!name || !roomId) return;
 
-        // 如果该 socket 之前已经在其他房间或有其他身份，先清理
-        cleanUpSocketRole(socket);
+        console.log(`口译员 [${name}] 携带房间号 [${roomId}] 登录并激活房间`);
+        
+        // 如果房间在服务器端没有状态记录，初始化为暂停状态
+        if (!roomStates[roomId]) {
+            roomStates[roomId] = 'paused';
+        }
 
-        socket.join(roomId);
-        socket.roomId = roomId;
-        socket.role = 'interpreter';
+        // 告诉口译员：服务器已经登记好该房间，并把最新的听众端域名返回给 App 客户端
+        socket.emit('interpreter-registered', {
+            roomId: roomId,
+            domain: audienceDomain
+        });
 
-        const room = getOrCreateRoom(roomId);
-        room.interpreterId = socket.id;
-
-        // 向房间同步状态与人数
-        broadcastRoomStatus(roomId);
-        console.log(`译员 ${socket.id} 成功加入房间 ${roomId}`);
+        // ===================【核心修复】===================
+        // 检查房间里是否已经有等候中的听众（口译员后进房间的情况）
+        const clients = io.sockets.adapter.rooms.get(roomId);
+        if (clients) {
+            clients.forEach((clientId) => {
+                // 排除口译员自己的 Socket ID
+                if (clientId !== socket.id) {
+                    console.log(`发现等候中的听众 [${clientId}]，主动通知口译端建立连接...`);
+                    // 触发口译端，对该听众发起连接
+                    socket.emit('new-user-joined', clientId);
+                }
+            });
+        }
+        // ==================================================
     });
 
-    // 2. 听众加入房间
+    // 无论是口译员还是听众，加入指定的房间
     socket.on('join-room', (roomId) => {
         if (!roomId) return;
-
-        // 如果该 socket 之前已经在其他房间或有其他身份，先清理
-        cleanUpSocketRole(socket);
-
         socket.join(roomId);
-        socket.roomId = roomId;
-        socket.role = 'listener';
+        console.log(`Socket [${socket.id}] 加入房间: ${roomId}`);
 
-        const room = getOrCreateRoom(roomId);
-        room.listeners.add(socket.id);
+        // 1. 获取房间当前状态，默认为 paused
+        const currentStatus = roomStates[roomId] || 'paused';
+        
+        // 2. 单独向刚加入的这个客户端推送房间当前的状态
+        socket.emit('status-updated', currentStatus);
 
-        // 听众加入，立即同步房间的当前直播状态和更新听众人数
-        broadcastRoomStatus(roomId);
-        console.log(`听众 ${socket.id} 加入房间 ${roomId}，当前听众数: ${room.listeners.size}`);
+        // 3. 无条件通知房间内的口译员：有新听众进入，立即开始打通 WebRTC
+        // 即使当前是 'paused' 状态，也要先把底层声音传输管道接通
+        socket.to(roomId).emit('new-user-joined', socket.id);
+        
+        // 广播当前听众人数
+        broadcastAudienceCount(roomId);
     });
 
-    // 3. 口译员切换直播状态（开始/暂停）
-    socket.on('toggle-live', ({ roomId, isLive }) => {
-        if (!roomId || !rooms[roomId]) return;
-        const room = rooms[roomId];
-
-        // 校验：仅允许当前房间绑定的译员修改状态
-        if (socket.role === 'interpreter' && room.interpreterId === socket.id) {
-            room.isLive = !!isLive;
-            console.log(`房间 ${roomId} 直播状态更新为: ${room.isLive ? 'LIVE' : 'PAUSED'}`);
-            broadcastRoomStatus(roomId);
-        }
-    });
-
-    // 4. WebRTC 信令透传转发 (Offer / Answer / Candidate)
+    // WebRTC 核心信令转发
     socket.on('signal', (data) => {
-        if (data && data.to) {
-            // 确保透传数据中有安全的 from 标识，防止前端拿到空来源
+        const toId = data.to;
+        if (toId) {
             data.from = socket.id;
-            io.to(data.to).emit('signal', data);
+            io.to(toId).emit('signal', data);
         }
     });
 
-    // 5. 断开连接处理（自动清理听众人数与房间）
+    // 口译员更新直播/暂停状态
+    socket.on('interpreter-status', (data) => {
+        if (!data) return;
+        const { roomId, status } = data;
+        if (roomId && (status === 'live' || status === 'paused')) {
+            console.log(`房间 [${roomId}] 状态更新为: ${status}`);
+            
+            // 缓存房间最新状态到内存中
+            roomStates[roomId] = status;
+
+            // 广播给房间内的所有人改变 UI 状态
+            io.to(roomId).emit('status-updated', status);
+            io.to(roomId).emit('interpreter-status', data); // 冗余发送，确保兼容
+        }
+    });
+
+    // 听众断开连接时，更新人数统计
+    socket.on('disconnecting', () => {
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                setTimeout(() => broadcastAudienceCount(room), 500);
+            }
+        }
+    });
+
     socket.on('disconnect', () => {
-        cleanUpSocketRole(socket);
+        console.log('客户端断开:', socket.id);
     });
 });
 
+function broadcastAudienceCount(roomId) {
+    const clients = io.sockets.adapter.rooms.get(roomId);
+    const count = clients ? clients.size : 0;
+    // 听众人数 = 总人数 - 1（刨除口译员自己）
+    const audienceCount = Math.max(0, count - 1);
+    io.to(roomId).emit('update-audience-count', audienceCount);
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`同声传译服务已成功启动，运行端口: ${PORT}`);
+http.listen(PORT, () => {
+    console.log(`服务器正在端口 ${PORT} 上运行`);
 });
